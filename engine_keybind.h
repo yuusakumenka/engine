@@ -1,3 +1,6 @@
+/* Copyright (c) 2024 Yuusaku Menka
+ * Licensed under the Apache license, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) */
+
 #ifdef __INTELLISENSE__
 #include "engine_types.h"
 #include "engine_module_input.h"
@@ -89,3 +92,8 @@ void keybind_from_cstr(Keybind *keybind, char *cstr);
 // ie.: keybind_from_cstr(&keybind, "Shift+A");
 // ie.: keybind_from_cstr(&keybind, "SHIFT+A");
 // ie.: keybind_from_cstr(&keybind, "Left Arrow key");
+
+Button_State keybind(Keybind *keybind);
+
+//#define KEYBIND_FORMAT_MAX_BYTES (sizeof("Right Mouse Button") - 1)
+//void keybind_format(S8 *dst, char *bytes, U8 alternative, Keybind *keybind);

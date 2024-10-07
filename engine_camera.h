@@ -1,3 +1,6 @@
+/* Copyright (c) 2024 Yuusaku Menka
+ * Licensed under the Apache license, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) */
+
 typedef float Camera_F32;
 
 typedef struct Camera_V2F32 {
@@ -60,6 +63,23 @@ M3x2 world_to_viewport(Camera* camera, F32 viewport_aspect_ratio) {
         0              , inverse_scale.y, -camera->position.y * inverse_scale.y
     );
 }
+#define camera_world_to_viewport world_to_viewport
+
+M4 world_to_viewport_m4(Camera* camera, F32 viewport_aspect_ratio) {
+    V2 scale         = camera_letterbox(camera, viewport_aspect_ratio);
+    V2 inverse_scale = v2(
+        1.0f / scale.x,
+        1.0f / scale.y
+    );
+    return m4(
+        inverse_scale.x, 0              , 0, -camera->position.x * inverse_scale.x,
+        0              , inverse_scale.y, 0, -camera->position.y * inverse_scale.y,
+        0              , 0              , 1, 0                                    ,
+        0              , 0              , 0, 1
+    );
+}
+#define camera_world_to_viewport_m4 world_to_viewport_m4
+
 M3x2 viewport_to_world(Camera* camera, F32 viewport_aspect_ratio) {
     V2 scale = camera_letterbox(camera, viewport_aspect_ratio);
     return m3x2(
@@ -67,3 +87,4 @@ M3x2 viewport_to_world(Camera* camera, F32 viewport_aspect_ratio) {
         0      , scale.y, camera->position.y
     );
 }
+#define camera_viewport_to_world viewport_to_world

@@ -1,3 +1,8 @@
+/* Copyright (c) 2024 Yuusaku Menka
+ * Licensed under the Apache license, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) */
+
+#ifndef ENGINE_WIN32_H
+#define ENGINE_WIN32_H
 #ifdef __INTELLISENSE__
 #include "engine.h"
 #endif // __INTELLISENSE__
@@ -8,7 +13,7 @@
 //#define NOWINSTYLES      
 #define NOSYSMETRICS     
 #define NOMENUS          
-#define NOICONS          
+//#define NOICONS          
 #define NOKEYSTATES      
 #define NOSYSCOMMANDS    
 #define NORASTEROPS      
@@ -48,18 +53,28 @@
 #include <strsafe.h> // StringCchPrintf()
 #pragma comment(lib, "user32")
 
+#define WIN32_INITIAL_INVISIBLE_WINDOW_CLASS_NAME TEXT("Initial Invisible Window Class")
+#define WIN32_WINDOW_CLASS_NAME                   TEXT("Window Class")
+
+/* Custom Window Messages */
+#define WM_USER_CREATE_WINDOW         WM_USER + 0
+#define WM_USER_DESTROY_WINDOW        WM_USER + 1
+#define WM_USER_CREATE_OPENGL_CONTEXT WM_USER + 2
+
 // gpu
 void engine_backend_win32_opengl_pre_window_init(HINSTANCE hInstance);
-void engine_backend_win32_opengl_post_window_init();
+HGLRC engine_backend_win32_opengl_post_window_init(HDC hdc);
+void gl_error_guard(char *proc_name);
 
 // threading
 #include <processthreadsapi.h>
+#include "engine_threading_win32.h"
 
 // memory
-#include "engine_win32_arena.h"
+#include "engine_arena_win32.h"
 
 // assets
-#include "engine_win32_asset.h"
+#include "engine_asset_win32.h"
 
 // audio
 #ifndef ENGINE_DISABLE_MODULE_AUDIO
@@ -81,354 +96,451 @@ static const   IID   IID_IAudioClient        = { 0x1cb9ad4c, 0xdbfa, 0x4c32, {0x
 static const   IID   IID_IAudioRenderClient  = { 0xf294acfc, 0x3146, 0x4483, {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2} };
 #endif // ENGINE_DISABLE_MODULE_AUDIO
 
+typedef struct Win32_CreateWindowEx_Command {
+    DWORD     dwExStyle;
+    LPCTSTR   lpClassName;
+    LPCTSTR   lpWindowName;
+    DWORD     dwStyle;
+    int       X;
+    int       Y;
+    int       nWidth;
+    int       nHeight;
+    HWND      hWndParent;
+    HMENU     hMenu;
+    HINSTANCE hInstance;
+    LPVOID    lpParam;
+} Win32_CreateWindowEx_Command;
+
+/* engine_os_win32_types.h*/
+typedef struct Os_Win32_Surface {
+    HWND hwnd;
+    HDC  hdc;
+} Os_Win32_Surface;
+
 // backend
 typedef struct Win32 {
-	HCURSOR cursor;
-	HWND    hwnd;
-    HDC     hdc;
+    HWND hwnd;
+    Os_Win32_Surface main_surface;
+    HINSTANCE     hInstance;
+    //HWND      main_hwnd;
+    //HWND      hwnd;
+    //HDC       hdc;
+    Os_Cursor cursor;
+    HCURSOR   cursors[OS_CURSOR_COUNT];
+    UINT_PTR  resize_timer;
 
-	// audio 
-	#ifndef ENGINE_DISABLE_MODULE_AUDIO
+    /* Inputs */
+    POINT  cursor_position;
+    POINT  cursor_position_last_frame;
+    V2     mouse_wheel;
+    U64    buttons[256 / ((sizeof(U64) * 8) / 2)];
+    In     ins[2];
+    In    *in_current;
+	size_t in_lock;
 
-		// wasapi
-		IAudioClient       *pAudioClient;
-		IAudioRenderClient *pAudioRenderClient;
-		UINT32              bufferFrameCount;
-		REFERENCE_TIME      hnsActualDuration;
-		UINT32              nSamplesPerSec;
+    // audio 
+    #ifndef ENGINE_DISABLE_MODULE_AUDIO
 
-	#endif // ENGINE_DISABLE_MODULE_AUDIO
+        // wasapi
+        IAudioClient       *pAudioClient;
+        IAudioRenderClient *pAudioRenderClient;
+        UINT32              bufferFrameCount;
+        REFERENCE_TIME      hnsActualDuration;
+        UINT32              nSamplesPerSec;
 
-	// gpu
-	//Emulated_Gpu_Backend gpu;
+    #endif // ENGINE_DISABLE_MODULE_AUDIO
+
+    // gpu
+    //Emulated_Gpu_Backend gpu;
 } Win32;
 
 static Win32  _win32;
 static Engine _engine;
 static Win32* win32;
 
-void ErrorExit(LPTSTR lpszFunction) { 
-	// Retrieve the system error message for the last-error code
+/* Inputs */
+#include "engine_in_win32.h"
 
-	LPVOID lpMsgBuf;
-	LPVOID lpDisplayBuf;
-	DWORD dw = GetLastError(); 
+/* Os */
+#include "engine_os_win32.h"
 
-	FormatMessage(
-		FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-		FORMAT_MESSAGE_FROM_SYSTEM |
-		FORMAT_MESSAGE_IGNORE_INSERTS,
-		NULL,
-		dw,
-		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-		(LPTSTR) &lpMsgBuf,
-		0, NULL );
-
-	// Display the error message and exit the process
-
-	lpDisplayBuf = (LPVOID)LocalAlloc(LMEM_ZEROINIT, 
-	                                  (lstrlen((LPCTSTR)lpMsgBuf) + lstrlen((LPCTSTR)lpszFunction) + 40) * sizeof(TCHAR)); 
-	StringCchPrintf((LPTSTR)lpDisplayBuf, 
-	                LocalSize(lpDisplayBuf) / sizeof(TCHAR),
-	                TEXT("%s failed with error %d: %s"), 
-	                lpszFunction, dw, lpMsgBuf); 
-	MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK); 
-
-	LocalFree(lpMsgBuf);
-	LocalFree(lpDisplayBuf);
-	ExitProcess(dw); 
+/* @DEPRECATED Use os_error instead. */
+void engine_error(char* title, char *msg, ...) {
+    size_t size         = 512 * sizeof(TCHAR);
+    LPTSTR lpDisplayBuf = (LPTSTR)alloca(size); 
+    va_list argList;
+    va_start(argList, msg);
+    StringCchVPrintfA(
+        lpDisplayBuf, 
+        size,
+        msg,
+        argList
+    );
+    va_end(argList);
+    MessageBoxA(NULL, lpDisplayBuf, title, MB_OK);
 }
 
-void GeneralErrorExit(char* title, char* msg) { 
-    MessageBoxA(NULL, msg, title, MB_OK);
-    ExitProcess(1); 
-}
+// /* @DEPRECATED Use os_exit instead. */
+// void engine_crash(int error) {
+//     if(IsDebuggerPresent())
+//         __debugbreak();
+//     ExitProcess(error); 
+// }
 
 #ifndef ENGINE_DISABLE_MODULE_AUDIO
 void AudioClientErrorExit(HRESULT result, LPTSTR lpszFunction) {
-	LPCTSTR AudioClientErrorExitTable[40] = {
-		TEXT("The IAudioClient object is already initialized. (AUDCLNT_E_ALREADY_INITIALIZED)"),
-		TEXT("The requested buffer size is not aligned. (AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)"),
-		TEXT("The buffer duration value requested by an exclusive-mode client is out of range. (AUDCLNT_E_BUFFER_SIZE_ERROR)"),
-		TEXT("The process-pass duration exceeded the maximum CPU usage. (AUDCLNT_E_CPUUSAGE_EXCEEDED)"),
-		TEXT("The audio endpoint device has been unplugged, reconfigured or disabled. (AUDCLNT_E_DEVICE_INVALIDATED)"),
-		TEXT("The endpoint device is already in use. (AUDCLNT_E_DEVICE_IN_USE)"),
-		TEXT("Failed to create the audio endpoint for the render or the capture device. (AUDCLNT_E_ENDPOINT_CREATE_FAILED)"),
-		TEXT("The device period requested by an exclusive-mode client is greater than 5000 milliseconds. (AUDCLNT_E_INVALID_DEVICE_PERIOD)"),
-		TEXT("The audio engine (shared mode) or audio endpoint device (exclusive mode) does not support the specified format. (AUDCLNT_E_UNSUPPORTED_FORMAT)"),
-		TEXT("User has disabled exclusive-mode use of the device. (AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED)"),
-		TEXT("Parameters hnsBufferDuration and hnsPeriodicity are not equal. (AUDCLNT_E_BUFDURATION_PERIOD_NOT_EQUAL)"),
-		TEXT("The Windows audio service is not running. AUDCLNT_E_SERVICE_NOT_RUNNING")
-	};
-	LPVOID lpDisplayBuf;
-	LPCTSTR pszFormat = AudioClientErrorExitTable[HRESULT_CODE(result)];
-	lpDisplayBuf = (LPVOID)LocalAlloc(
-		LMEM_ZEROINIT, 
-		(lstrlen((LPCTSTR)pszFormat) + lstrlen((LPCTSTR)lpszFunction) + 40) * sizeof(TCHAR)
-	); 
-	StringCchPrintf(
-		(LPTSTR)lpDisplayBuf, 
-	    LocalSize(lpDisplayBuf) / sizeof(TCHAR),
-	    TEXT("%s failed with error %d: %s"), 
-	    lpszFunction, 
-		HRESULT_CODE(result), 
-		pszFormat
-	); 
-	MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK); 
-	LocalFree(lpDisplayBuf);
-	ExitProcess(HRESULT_CODE(result)); 
+    LPCTSTR AudioClientErrorExitTable[40] = {
+        TEXT("The IAudioClient object is already initialized. (AUDCLNT_E_ALREADY_INITIALIZED)"),
+        TEXT("The requested buffer size is not aligned. (AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)"),
+        TEXT("The buffer duration value requested by an exclusive-mode client is out of range. (AUDCLNT_E_BUFFER_SIZE_ERROR)"),
+        TEXT("The process-pass duration exceeded the maximum CPU usage. (AUDCLNT_E_CPUUSAGE_EXCEEDED)"),
+        TEXT("The audio endpoint device has been unplugged, reconfigured or disabled. (AUDCLNT_E_DEVICE_INVALIDATED)"),
+        TEXT("The endpoint device is already in use. (AUDCLNT_E_DEVICE_IN_USE)"),
+        TEXT("Failed to create the audio endpoint for the render or the capture device. (AUDCLNT_E_ENDPOINT_CREATE_FAILED)"),
+        TEXT("The device period requested by an exclusive-mode client is greater than 5000 milliseconds. (AUDCLNT_E_INVALID_DEVICE_PERIOD)"),
+        TEXT("The audio engine (shared mode) or audio endpoint device (exclusive mode) does not support the specified format. (AUDCLNT_E_UNSUPPORTED_FORMAT)"),
+        TEXT("User has disabled exclusive-mode use of the device. (AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED)"),
+        TEXT("Parameters hnsBufferDuration and hnsPeriodicity are not equal. (AUDCLNT_E_BUFDURATION_PERIOD_NOT_EQUAL)"),
+        TEXT("The Windows audio service is not running. AUDCLNT_E_SERVICE_NOT_RUNNING")
+    };
+    LPVOID lpDisplayBuf;
+    LPCTSTR pszFormat = AudioClientErrorExitTable[HRESULT_CODE(result)];
+    lpDisplayBuf = (LPVOID)LocalAlloc(
+        LMEM_ZEROINIT, 
+        (lstrlen((LPCTSTR)pszFormat) + lstrlen((LPCTSTR)lpszFunction) + 40) * sizeof(TCHAR)
+    ); 
+    StringCchPrintf(
+        (LPTSTR)lpDisplayBuf, 
+        LocalSize(lpDisplayBuf) / sizeof(TCHAR),
+        TEXT("%s failed with error %d: %s"), 
+        lpszFunction, 
+        HRESULT_CODE(result), 
+        pszFormat
+    ); 
+    MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK); 
+    LocalFree(lpDisplayBuf);
+    ExitProcess(HRESULT_CODE(result)); 
 }
 
 #define AUDIO_FRAMES_TO_MILLISECONDS(numAudioFrames, nSamplesPerSec) \
-	((numAudioFrames * 1000) / nSamplesPerSec)
+    ((numAudioFrames * 1000) / nSamplesPerSec)
 #define MILLISECONDS_TO_AUDIO_FRAMES(numMs, nSamplesPerSec) \
-	(((numMs * nSamplesPerSec) + (1000 - 1)) / 1000)
+    (((numMs * nSamplesPerSec) + (1000 - 1)) / 1000)
 //USER_API _audio
 DWORD WINAPI AudioThreadProc(LPVOID lpParam) {		
-	// initalize WASAPI
-	HRESULT result;
+    // initalize WASAPI
+    HRESULT result;
 
-	CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY);
-	
-	// get an instance to a device enumerator
-	IMMDeviceEnumerator *device_enumerator = NULL;
-	result = CoCreateInstance(
-		&CLSID_MMDeviceEnumerator, 
-		NULL,
-		CLSCTX_ALL,
-		&IID_IMMDeviceEnumerator,
-		(void**)&device_enumerator
-	);
-	if (FAILED(result)) return result;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY);
+    
+    // get an instance to a device enumerator
+    IMMDeviceEnumerator *device_enumerator = NULL;
+    result = CoCreateInstance(
+        &CLSID_MMDeviceEnumerator, 
+        NULL,
+        CLSCTX_ALL,
+        &IID_IMMDeviceEnumerator,
+        (void**)&device_enumerator
+    );
+    if (FAILED(result)) return result;
 
-	// get the default audio device
-	IMMDevice* device;
-	result = IMMDeviceEnumerator_GetDefaultAudioEndpoint(
-		device_enumerator, 
-		eRender, 
-		eConsole, 
-		&device
-	);
-	if (FAILED(result)) return result;
+    // get the default audio device
+    IMMDevice* device;
+    result = IMMDeviceEnumerator_GetDefaultAudioEndpoint(
+        device_enumerator, 
+        eRender, 
+        eConsole, 
+        &device
+    );
+    if (FAILED(result)) return result;
 
-	// activate the audio device
-	IAudioClient* pAudioClient;
-	result = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&pAudioClient);
-	if (FAILED(result)) return result;
-	win32->pAudioClient = pAudioClient;
+    // activate the audio device
+    IAudioClient* pAudioClient;
+    result = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&pAudioClient);
+    if (FAILED(result)) return result;
+    win32->pAudioClient = pAudioClient;
 
-	// initalize an audio client for our application
-	WAVEFORMATEX * pWaveFormat;
-	result = IAudioClient_GetMixFormat(pAudioClient, &pWaveFormat);
-	if (FAILED(result)) AudioClientErrorExit(result, TEXT("IAudioClient_GetMixFormat"));
-	DWORD nSamplesPerSec = pWaveFormat->nSamplesPerSec;
-	nSamplesPerSec = 44100;
+    // initalize an audio client for our application
+    WAVEFORMATEX * pWaveFormat;
+    result = IAudioClient_GetMixFormat(pAudioClient, &pWaveFormat);
+    if (FAILED(result)) AudioClientErrorExit(result, TEXT("IAudioClient_GetMixFormat"));
+    DWORD nSamplesPerSec = pWaveFormat->nSamplesPerSec;
+    nSamplesPerSec = 44100;
 
-	CoTaskMemFree(pWaveFormat);
-	
-	WAVEFORMATEXTENSIBLE waveFormat;
-	waveFormat.Format.cbSize               = sizeof(waveFormat);
-	waveFormat.Format.wFormatTag           = WAVE_FORMAT_EXTENSIBLE;
-	waveFormat.Format.wBitsPerSample       = 16;
-	waveFormat.Format.nChannels            = 2;
-	waveFormat.Format.nSamplesPerSec       = nSamplesPerSec;
-	waveFormat.Format.nBlockAlign          = (WORD)(waveFormat.Format.nChannels * waveFormat.Format.wBitsPerSample / 8);
-	waveFormat.Format.nAvgBytesPerSec      = waveFormat.Format.nSamplesPerSec * waveFormat.Format.nBlockAlign;
-	waveFormat.Samples.wValidBitsPerSample = 16;
-	waveFormat.dwChannelMask               = KSAUDIO_SPEAKER_STEREO;
-	waveFormat.SubFormat                   = KSDATAFORMAT_SUBTYPE_PCM;
+    CoTaskMemFree(pWaveFormat);
+    
+    WAVEFORMATEXTENSIBLE waveFormat;
+    waveFormat.Format.cbSize               = sizeof(waveFormat);
+    waveFormat.Format.wFormatTag           = WAVE_FORMAT_EXTENSIBLE;
+    waveFormat.Format.wBitsPerSample       = 16;
+    waveFormat.Format.nChannels            = 2;
+    waveFormat.Format.nSamplesPerSec       = nSamplesPerSec;
+    waveFormat.Format.nBlockAlign          = (WORD)(waveFormat.Format.nChannels * waveFormat.Format.wBitsPerSample / 8);
+    waveFormat.Format.nAvgBytesPerSec      = waveFormat.Format.nSamplesPerSec * waveFormat.Format.nBlockAlign;
+    waveFormat.Samples.wValidBitsPerSample = 16;
+    waveFormat.dwChannelMask               = KSAUDIO_SPEAKER_STEREO;
+    waveFormat.SubFormat                   = KSDATAFORMAT_SUBTYPE_PCM;
 
-	REFERENCE_TIME hnsRequestedDuration = 10000000ULL * 60;
+    REFERENCE_TIME hnsRequestedDuration = 10000000ULL * 60;
 
-	result = IAudioClient_Initialize(
-		pAudioClient, 
-		AUDCLNT_SHAREMODE_SHARED, 
-		AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_RATEADJUST,
-		hnsRequestedDuration, 
-		0, 
-		&waveFormat.Format, 
-		NULL
-	);
-	if (FAILED(result)) AudioClientErrorExit(result, TEXT("IAudioClient_Initialize"));
-	
-	INT32 bufferFrameCount;
-	result = IAudioClient_GetBufferSize(pAudioClient, &bufferFrameCount);
-	if (FAILED(result)) AudioClientErrorExit(result, TEXT("IAudioClient_GetBufferSize"));
-	REFERENCE_TIME hnsActualDuration = 10000000 * bufferFrameCount / nSamplesPerSec;
+    result = IAudioClient_Initialize(
+        pAudioClient, 
+        AUDCLNT_SHAREMODE_SHARED, 
+        AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_RATEADJUST,
+        hnsRequestedDuration, 
+        0, 
+        &waveFormat.Format, 
+        NULL
+    );
+    if (FAILED(result)) AudioClientErrorExit(result, TEXT("IAudioClient_Initialize"));
+    
+    INT32 bufferFrameCount;
+    result = IAudioClient_GetBufferSize(pAudioClient, &bufferFrameCount);
+    if (FAILED(result)) AudioClientErrorExit(result, TEXT("IAudioClient_GetBufferSize"));
+    REFERENCE_TIME hnsActualDuration = 10000000 * bufferFrameCount / nSamplesPerSec;
 
-	IAudioRenderClient* pAudioRenderClient;
-	result = IAudioClient_GetService(
-		pAudioClient, 
-		&IID_IAudioRenderClient, 
-		(void **)&pAudioRenderClient
-	);
-	if (FAILED(result)) return result;
-	win32->pAudioRenderClient = pAudioRenderClient;
+    IAudioRenderClient* pAudioRenderClient;
+    result = IAudioClient_GetService(
+        pAudioClient, 
+        &IID_IAudioRenderClient, 
+        (void **)&pAudioRenderClient
+    );
+    if (FAILED(result)) return result;
+    win32->pAudioRenderClient = pAudioRenderClient;
 
-	// make the audio client start playing
-	IAudioClient_Start(pAudioClient);
+    // make the audio client start playing
+    IAudioClient_Start(pAudioClient);
 
-	win32->hnsActualDuration = hnsActualDuration;
-	win32->bufferFrameCount  = bufferFrameCount;
-	win32->nSamplesPerSec    = nSamplesPerSec;
+    win32->hnsActualDuration = hnsActualDuration;
+    win32->bufferFrameCount  = bufferFrameCount;
+    win32->nSamplesPerSec    = nSamplesPerSec;
 
-	DWORD msLastTick = GetTickCount();
-	for (;;) {
-		DWORD msCurrentTick = GetTickCount();
-		DWORD msDeltaTick = msCurrentTick - msLastTick;
-		msLastTick = msCurrentTick;
-		// TODO: Handle device swap
-		HRESULT result;
-		UINT32 numPaddingAudioFrames;
-		result = IAudioClient_GetCurrentPadding(
-			win32->pAudioClient, 
-			&numPaddingAudioFrames
-		);
-		UINT32 numAvailableAudioFrames = 
-			win32->bufferFrameCount - numPaddingAudioFrames;
-		INT32 numDesiredAudioFrames = MILLISECONDS_TO_AUDIO_FRAMES(
-			msDeltaTick,
-			win32->nSamplesPerSec
-		);
-		numDesiredAudioFrames = max(numDesiredAudioFrames, 0);
-		UINT32 numRequestedAudioFrames = min(
-			numAvailableAudioFrames, 
-			numDesiredAudioFrames
-		);
-		BYTE* pData;
-		result = IAudioRenderClient_GetBuffer(
-			win32->pAudioRenderClient,
-			numRequestedAudioFrames,
-			&pData
-		);
-		if (SUCCEEDED(result)) {
-			_audio(numRequestedAudioFrames, (short*)pData);
-			IAudioRenderClient_ReleaseBuffer(
-				win32->pAudioRenderClient,
-				numRequestedAudioFrames,
-				0
-			);
-		}
-		Sleep(AUDIO_FRAMES_TO_MILLISECONDS(
-			engine->audio_latency_in_audio_frames,
-			win32->nSamplesPerSec
-		));
-	}
+    DWORD msLastTick = GetTickCount();
+    for (;;) {
+        DWORD msCurrentTick = GetTickCount();
+        DWORD msDeltaTick = msCurrentTick - msLastTick;
+        msLastTick = msCurrentTick;
+        // TODO: Handle device swap
+        HRESULT result;
+        UINT32 numPaddingAudioFrames;
+        result = IAudioClient_GetCurrentPadding(
+            win32->pAudioClient, 
+            &numPaddingAudioFrames
+        );
+        UINT32 numAvailableAudioFrames = 
+            win32->bufferFrameCount - numPaddingAudioFrames;
+        INT32 numDesiredAudioFrames = MILLISECONDS_TO_AUDIO_FRAMES(
+            msDeltaTick,
+            win32->nSamplesPerSec
+        );
+        numDesiredAudioFrames = max(numDesiredAudioFrames, 0);
+        UINT32 numRequestedAudioFrames = min(
+            numAvailableAudioFrames, 
+            numDesiredAudioFrames
+        );
+        BYTE* pData;
+        result = IAudioRenderClient_GetBuffer(
+            win32->pAudioRenderClient,
+            numRequestedAudioFrames,
+            &pData
+        );
+        if (SUCCEEDED(result)) {
+            _audio(numRequestedAudioFrames, (short*)pData);
+            IAudioRenderClient_ReleaseBuffer(
+                win32->pAudioRenderClient,
+                numRequestedAudioFrames,
+                0
+            );
+        }
+        Sleep(AUDIO_FRAMES_TO_MILLISECONDS(
+            engine->audio_latency_in_audio_frames,
+            win32->nSamplesPerSec
+        ));
+    }
 }
 #endif // ENGINE_DISABLE_MODULE_AUDIO
 
-LRESULT CALLBACK WindowProc(
-    HWND   hwnd,
-    UINT   uMsg,
-    WPARAM wParam,
-    LPARAM lParam
-) {
-    switch (uMsg) {
+void engine_main_loop_body(void *data) {
+
+    // engine pre update
+    #ifndef ENGINE_DISABLE_ENGINE_PRE_UPDATE
+    engine_pre_update(engine);
+    #endif // ENGINE_DISABLE_ENGINE_PRE_UPDATE
+
     // inputs
-    case WM_KEYDOWN:
-    case WM_KEYUP:
-    case WM_SYSKEYDOWN:
-    case WM_SYSKEYUP:
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-    //case WM_MOUSEWHEEL:
+    #if 0
+    // updat mouse position
     {
-        UINT down = 0;
-        //if (
-        //    uMsg == WM_MBUTTONDOWN ||
-        //    uMsg == WM_MBUTTONUP   
-        //) {
-        //    down |= (wParam & MK_MBUTTON) != 0;
-        //    wParam = VK_MBUTTON;
-        //}
-
-        down |=
-            uMsg == WM_LBUTTONDOWN ||
-            uMsg == WM_RBUTTONDOWN ||
-            uMsg == WM_MBUTTONDOWN ||
-            uMsg == WM_SYSKEYDOWN  ||
-            uMsg == WM_KEYDOWN;
-
-             if (uMsg == WM_LBUTTONUP || uMsg == WM_LBUTTONDOWN) wParam = VK_LBUTTON;
-        else if (uMsg == WM_RBUTTONUP || uMsg == WM_RBUTTONDOWN) wParam = VK_RBUTTON;
-        else if (uMsg == WM_MBUTTONUP || uMsg == WM_MBUTTONDOWN) 
-                 wParam = VK_MBUTTON;
-
-        U64 button_batch_index  = (U64)wParam >> 5;
-        U64 button_bit_in_batch = (U64)1 << ((wParam & (32 - 1)) << 1);
-        if (engine->buttons[button_batch_index] & (button_bit_in_batch << 1)) {
-            if (!down) engine->buttons[button_batch_index] &= ~button_bit_in_batch;
-        } else {
-            if (down) engine->buttons[button_batch_index] |= button_bit_in_batch;
-        }
-    } break;
-    case WM_MOUSEWHEEL: {
-        engine->mouse_wheel.y = (F32)((signed short)HIWORD(wParam) / WHEEL_DELTA);
-    } break;
-    case WM_MOUSEMOVE: {
-        SetCursor(win32->cursor);
-        engine->window_flags |=  ENGINE_WINDOWING_FLAG_HOVER;
-    } break;
-    // resize
-    case WM_SIZE: {
-        int width  = LOWORD(lParam); 
-        int height = HIWORD(lParam);
-        engine->window_size_in_px.x = width;
-        engine->window_size_in_px.y = height;
-    } break;
-    // window is asked to be displayed
-    case WM_SHOWWINDOW: {
-        // Immediatly get rid of the hourglass cursor.
-        SetCursor(win32->cursor);
-
-//		// There is a bug on Windows, where the act of asking to show
-//		// a given window, will fill it's DC with a white brush,
-//		// regardless of the hbrBackground submitted on calling RegisterClass().
-//		// This causes a white flash whenever the window is shown.
-//		// To hack around this we ask Windows to play a blend animation if supported.
-//		if (IsWindows8OrGreater()) {
-//			if (!GetLayeredWindowAttributes(hwnd, NULL, NULL, NULL)) {
-//				AnimateWindow(hwnd, 200, AW_ACTIVATE | AW_BLEND);
-//				return TRUE;
-//			}
-//		}
-    } break;
-	case WM_SETFOCUS: {
-		engine->window_flags |= ENGINE_WINDOWING_FLAG_FOCUS;
-	} break;
-	case WM_KILLFOCUS: {
-		engine->window_flags &= ~ENGINE_WINDOWING_FLAG_FOCUS;
-    } break;
-    case WM_NCMOUSELEAVE: {
-		engine->window_flags &= ~ENGINE_WINDOWING_FLAG_HOVER;
-    } break;
-    case WM_CLOSE: {
-        ExitProcess(0);
-        return TRUE;
-    } break;
-		
-//#ifndef ENGINE_DISABLE_INPUTS
-//	case WM_SYSKEYDOWN:
-//	case WM_SYSKEYUP:
-//	case WM_KEYDOWN:
-//	case WM_KEYUP: 
-//	{
-////		UINT32 VKCode = (UINT32)wParam;
-////		BOOL   WasDown = ((lParam & (1 << 30)) != 0);
-////		BOOL   IsDown = ((lParam & (1 << 31)) == 0);
-////		if(VKCode == 'Z' && IsDown)
-////		{
-////			++g_i_note;
-////		}
-//		++g_i_note;
-//	} break;
-//#endif // ENGINE_DISABLE_INPUTS
+        POINT cursor_position;
+        GetCursorPos(&cursor_position);
+        ScreenToClient(win32->hwnd, &cursor_position);
+        engine->mouse_position_at_last_frame = engine->mouse_position;
+        engine->mouse_position               = v2(cursor_position.x, engine->window_size_in_px.y - cursor_position.y);
+        engine->mouse_delta.x = engine->mouse_position.x - engine->mouse_position_at_last_frame.x;
+        engine->mouse_delta.y = engine->mouse_position.y - engine->mouse_position_at_last_frame.y;
+        //if(engine.delta_time > 0)
+        //    engine.mouse.velocity           = lerp(engine.mouse.velocity, engine.mouse.delta / engine.delta_time, 0.75f);
     }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    #endif
+
+    // call user update
+    if(engine->update)
+        engine->update();
+
+    // if(engine->cursor != win32->cursor) {
+    //     PostMessage(0, WM_SETCURSOR, 0, 0);
+    //     POINT p = {0};
+    //     GetCursorPos(&p);
+    //     SetCursorPos(p.x, p.y);
+    // }
+
+    //if(engine->window_flags & ENGINE_WINDOWING_FLAG_HOVER) {
+    //    SetCursor(win32->cursors[engine->cursor]);
+    //}
+    
+    // deleteme
+    // // engine post update
+    // #ifndef ENGINE_DISABLE_ENGINE_POST_UPDATE
+    // engine_post_update(engine);
+    // #endif // ENGINE_DISABLE_ENGINE_POST_UPDATE
+}
+
+void win32_main_loop_body() {
+    // for(
+    //     Job *graphic_job = job_ring_try_remove_one(&engine->job_ring_graphics);
+    //     graphic_job;
+    //     graphic_job = job_ring_try_remove_one(&engine->job_ring_graphics)
+    // ) {
+    //     graphic_job->proc(graphic_job->data);
+    //     job_end(graphic_job);
+    // }
+    
+    for(
+        Job *job = job_ring64_try_remove_one(&engine->job_ring);
+        job;
+        job = job_ring64_try_remove_one(&engine->job_ring)
+    ) {
+        job->proc(job->data);
+        job_end(job);
+    }
+}
+
+void win32_worker_proc(void *data) {
+    if (engine->worker_init_proc)
+        engine->worker_init_proc(data);
+    for(size_t itteration_index = 0;;) {
+        Job *job = job_ring64_try_remove_one(&engine->job_ring);
+        if (job) {
+            job->proc(job->data);
+            job_end(job);
+            itteration_index = 0;
+        }
+        ++itteration_index;
+    }
+}
+
+void win32_graphics_worker_proc(Os_Win32_Surface *data) {
+    /* Init Opengl */
+    {
+        HDC hdc = data->hdc;
+        HGLRC context = (HGLRC)SendMessage(
+            win32->hwnd,
+            WM_USER_CREATE_OPENGL_CONTEXT,
+            (WPARAM)hdc,
+            0
+        );
+        wglMakeCurrent(hdc, context);
+        gl_error_guard("wglMakeCurrent");
+    }
+    if (engine->worker_init_proc)
+        engine->worker_init_proc(data);
+    if (engine->worker_graphic_init_proc)
+        engine->worker_graphic_init_proc(data);
+    for(size_t itteration_index = 0;;) {
+        Job *job;
+        job = job_ring64_try_remove_one(&engine->job_ring_graphics);
+        if (!job)
+            job = job_ring64_try_remove_one(&engine->job_ring);
+        if (job) {
+            job->proc(job->data);
+            job_end(job);
+            itteration_index = 0;
+            continue;
+        }
+        ++itteration_index;
+        if (itteration_index > 8) {
+            
+        }
+    }
+}
+
+static const Job WIN32_STARTUP_JOB = {
+    _STARTUP, /* _STARTUP_JOB */
+    &_engine, 
+    0,
+    0,
+    0,
+    0
+};
+
+void win32_startup_thread_proc(void *data) {
+    _STARTUP(engine);
+    
+    ASSERT(engine->update, "No update function provided. Please set engine->update to something.");
+    
+    /* Start Scheduler */
+    {
+        size_t num_logical_core = os_num_logical_core();
+        num_logical_core = 1;
+        //num_logical_core = num_logical_core > 1 ? 1 : num_logical_core;
+        size_t logical_core_index = 0;
+        /* Graphics Worker */
+        for (
+            ;
+            logical_core_index < num_logical_core;
+            ++logical_core_index
+        ) {
+            HANDLE hWorkerThread = CreateThread(
+                NULL,
+                0,
+                win32_graphics_worker_proc,
+                &win32->main_surface, /* HACK */
+                0,
+                NULL // lpThreadId
+            );
+
+            {
+                DWORD_PTR result;
+                SetThreadAffinityMask(
+                    hWorkerThread,
+                    (1ull << logical_core_index)
+                );
+            }
+        }
+        /* Regular Worker */
+        for (
+            ;
+            logical_core_index < num_logical_core;
+            ++logical_core_index
+        ) {
+            HANDLE hWorkerThread = CreateThread(
+                NULL,
+                0,
+                win32_worker_proc,
+                &win32->main_surface, /* HACK */
+                0,
+                NULL // lpThreadId
+            );
+
+            {
+                DWORD_PTR result;
+                SetThreadAffinityMask(
+                    hWorkerThread,
+                    (1ull << logical_core_index)
+                );
+            }
+        }
+    }
 }
 
 // TODO change to wWinMain
@@ -438,172 +550,220 @@ int WINAPI WinMain(
     LPSTR     lpCmdLine, 
     int       nCmdShow
 ) {
-	// initialize backend
-	win32 = (Win32*)&_win32;
+    // initialize backend
+    win32 = (Win32*)&_win32;
 
-	//// initialize emulated gpu module
-	//gpu_module_init_emulated_backend(&win32->gpu);
-	
-	engine = &_engine;
-	
-	// initialize gpu module
-	engine_backend_win32_opengl_pre_window_init(hInstance);
+    engine = &_engine;
+    
+    #ifndef ENGINE_DISABLE_GPU
+    // initialize gpu module
+    engine_backend_win32_opengl_pre_window_init(hInstance);
+    #endif /* !ENGINE_DISABLE_GPU */
+    
+    /* Load cursors */
+    {
+        #define FOREACH(o, w) win32->cursors[o] = LoadCursor(NULL, w);
+            OS_CURSOR_FOREACH(FOREACH)
+        #undef FOREACH
+        
+        BYTE ANDmaskCursor[] = 
+        { 
+            0xFF, 0xFC, 0x3F, 0xFF,   // line 1 
+            0xFF, 0xC0, 0x1F, 0xFF,   // line 2 
+            0xFF, 0x00, 0x3F, 0xFF,   // line 3 
+            0xFE, 0x00, 0xFF, 0xFF,   // line 4 
+        
+            0xF7, 0x01, 0xFF, 0xFF,   // line 5 
+            0xF0, 0x03, 0xFF, 0xFF,   // line 6 
+            0xF0, 0x03, 0xFF, 0xFF,   // line 7 
+            0xE0, 0x07, 0xFF, 0xFF,   // line 8 
+        
+            0xC0, 0x07, 0xFF, 0xFF,   // line 9 
+            0xC0, 0x0F, 0xFF, 0xFF,   // line 10 
+            0x80, 0x0F, 0xFF, 0xFF,   // line 11 
+            0x80, 0x0F, 0xFF, 0xFF,   // line 12 
+        
+            0x80, 0x07, 0xFF, 0xFF,   // line 13 
+            0x00, 0x07, 0xFF, 0xFF,   // line 14 
+            0x00, 0x03, 0xFF, 0xFF,   // line 15 
+            0x00, 0x00, 0xFF, 0xFF,   // line 16 
+        
+            0x00, 0x00, 0x7F, 0xFF,   // line 17 
+            0x00, 0x00, 0x1F, 0xFF,   // line 18 
+            0x00, 0x00, 0x0F, 0xFF,   // line 19 
+            0x80, 0x00, 0x0F, 0xFF,   // line 20 
+        
+            0x80, 0x00, 0x07, 0xFF,   // line 21 
+            0x80, 0x00, 0x07, 0xFF,   // line 22 
+            0xC0, 0x00, 0x07, 0xFF,   // line 23 
+            0xC0, 0x00, 0x0F, 0xFF,   // line 24 
+        
+            0xE0, 0x00, 0x0F, 0xFF,   // line 25 
+            0xF0, 0x00, 0x1F, 0xFF,   // line 26 
+            0xF0, 0x00, 0x1F, 0xFF,   // line 27 
+            0xF8, 0x00, 0x3F, 0xFF,   // line 28 
+        
+            0xFE, 0x00, 0x7F, 0xFF,   // line 29 
+            0xFF, 0x00, 0xFF, 0xFF,   // line 30 
+            0xFF, 0xC3, 0xFF, 0xFF,   // line 31 
+            0xFF, 0xFF, 0xFF, 0xFF    // line 32 
+        };
+        
+        // Yin-shaped cursor XOR mask 
+        
+        BYTE XORmaskCursor[] = 
+        { 
+            0x00, 0x00, 0x00, 0x00,   // line 1 
+            0x00, 0x03, 0xC0, 0x00,   // line 2 
+            0x00, 0x3F, 0x00, 0x00,   // line 3 
+            0x00, 0xFE, 0x00, 0x00,   // line 4 
+        
+            0x0E, 0xFC, 0x00, 0x00,   // line 5 
+            0x07, 0xF8, 0x00, 0x00,   // line 6 
+            0x07, 0xF8, 0x00, 0x00,   // line 7 
+            0x0F, 0xF0, 0x00, 0x00,   // line 8 
+        
+            0x1F, 0xF0, 0x00, 0x00,   // line 9 
+            0x1F, 0xE0, 0x00, 0x00,   // line 10 
+            0x3F, 0xE0, 0x00, 0x00,   // line 11 
+            0x3F, 0xE0, 0x00, 0x00,   // line 12 
+        
+            0x3F, 0xF0, 0x00, 0x00,   // line 13 
+            0x7F, 0xF0, 0x00, 0x00,   // line 14 
+            0x7F, 0xF8, 0x00, 0x00,   // line 15 
+            0x7F, 0xFC, 0x00, 0x00,   // line 16 
+        
+            0x7F, 0xFF, 0x00, 0x00,   // line 17 
+            0x7F, 0xFF, 0x80, 0x00,   // line 18 
+            0x7F, 0xFF, 0xE0, 0x00,   // line 19 
+            0x3F, 0xFF, 0xE0, 0x00,   // line 20 
+        
+            0x3F, 0xC7, 0xF0, 0x00,   // line 21 
+            0x3F, 0x83, 0xF0, 0x00,   // line 22 
+            0x1F, 0x83, 0xF0, 0x00,   // line 23 
+            0x1F, 0x83, 0xE0, 0x00,   // line 24 
+        
+            0x0F, 0xC7, 0xE0, 0x00,   // line 25 
+            0x07, 0xFF, 0xC0, 0x00,   // line 26 
+            0x07, 0xFF, 0xC0, 0x00,   // line 27 
+            0x01, 0xFF, 0x80, 0x00,   // line 28 
+        
+            0x00, 0xFF, 0x00, 0x00,   // line 29 
+            0x00, 0x3C, 0x00, 0x00,   // line 30 
+            0x00, 0x00, 0x00, 0x00,   // line 31 
+            0x00, 0x00, 0x00, 0x00    // line 32 
+        };
 
-	// initialize windowing
+        // Create a custom cursor at run time. 
+        
+        win32->cursors[3] = CreateCursor(
+            hInstance,   // app. instance 
+            19,                // horizontal position of hot spot 
+            2,                 // vertical position of hot spot 
+            32,                // cursor width 
+            32,                // cursor height 
+            ANDmaskCursor,     // AND mask 
+            XORmaskCursor      // XOR mask 
+        );
+    }
+
+    /* Invisible window:
+     *   Because of the way an application on Windows
+     *   must handle messages, the thread creating the window,
+     *   also responsible for handling it's messages, will stall
+     *   every time the user resizes that window.
+     *   To prevent the application from stalling, we dedicate
+     *   the initial thread to be responsible for creating and
+     *   destroying windows.
+     *   At startup we create a hidden window  on the initial
+     *   thread, responsible of handling our custom create
+     *   and destroy window events.
+     *   (We also profit from that hidden window to query the supported
+     *   OpenGL featureset on the executing machine. As the API requires
+     *   a window to do such.)
+     * 
+     *   This idea comes from Casey Muratori's Dangerous Threads Crew:
+     *   > https://github.com/cmuratori/dtc */
     HWND hwnd;
     {
-		const TCHAR WINDOW_CLASS_NAME[] = TEXT("\1");
-		const TCHAR WINDOW_TEXT[]       = TEXT("Hello");
         {
-            WNDCLASS window_class = { 0 };
-            window_class.style         = CS_VREDRAW | CS_HREDRAW | CS_OWNDC;
+            WNDCLASSEX window_class = {0};
+            window_class.cbSize        = sizeof(WNDCLASSEX);
+            window_class.style         = 0;
             window_class.lpfnWndProc   = WindowProc;
             window_class.hInstance     = hInstance;
-            window_class.lpszClassName = WINDOW_CLASS_NAME;
-            window_class.hbrBackground = (HBRUSH)(COLOR_WINDOW+3);
-            window_class.hIcon         = LoadIcon(hInstance, MAKEINTRESOURCE(1));
-            RegisterClass(&window_class);
+            window_class.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+            window_class.hCursor       = LoadCursor(NULL, IDC_ARROW);
+            window_class.lpszClassName = WIN32_INITIAL_INVISIBLE_WINDOW_CLASS_NAME;
+            //window_class.hbrBackground = NULL;
+            window_class.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+            //window_class.hIcon         = LoadIcon(hInstance, MAKEINTRESOURCE(1));
+            ATOM result = RegisterClassEx(&window_class);
+            if (result == 0)
+                os_win32_exit_with_error(TEXT("RegisterClassEx"));
         }
 
         hwnd = CreateWindowEx(
-            0,                                   // Optional window styles.
-            WINDOW_CLASS_NAME,                   // Window class
-            NULL,                                // Window text (set later)
-            WS_OVERLAPPEDWINDOW,// | WS_VISIBLE, // Window style
-            CW_USEDEFAULT, CW_USEDEFAULT,        // Window position 
-			0, 0,                                // Window size (set later)
+            0,                                         // Optional window styles.
+            WIN32_INITIAL_INVISIBLE_WINDOW_CLASS_NAME, // Window class
+            NULL,                                      // Window text (set later)
+            0,                                         // Window style
+            CW_USEDEFAULT, CW_USEDEFAULT,              // Window position 
+            CW_USEDEFAULT, CW_USEDEFAULT,              // Window size (set later)
 
-            NULL,       // Parent window    
+            HWND_MESSAGE, //NULL,       // Parent window    
             NULL,       // Menu
             hInstance,  // Instance handle
             NULL        // Additional application data
         );
-		if (hwnd == NULL) ErrorExit(TEXT("CreateWindowEx"));
-
-		// track mouse leaving client window area
-		TRACKMOUSEEVENT tackMouseEvent;
-		tackMouseEvent.cbSize  = sizeof(TRACKMOUSEEVENT);
-		tackMouseEvent.dwFlags = TME_NONCLIENT | TME_LEAVE;
-		tackMouseEvent.hwndTrack = hwnd;
-		if (!TrackMouseEvent(&tackMouseEvent)) 
-			ErrorExit(TEXT("TrackMouseEvent"));
-
-		// default cursor to arrows
-		win32->hwnd   = hwnd;
-        win32->hdc    = GetDC(hwnd);
-        win32->cursor = LoadCursor(NULL, IDC_ARROW);
+        if (hwnd == NULL) {
+            DWORD error = GetLastError();
+            os_win32_exit_with_error(TEXT("CreateWindowEx"));
+        }
     }
-	
-	engine_backend_win32_opengl_post_window_init();
-	
-	// initialize engine
-	#ifndef ENGINE_DISABLE_ENGINE_DEFAULT_INITIALIZATION
-	engine_pre_init(engine); // engine.h
-	#endif // ENGINE_DISABLE_ENGINE_DEFAULT_INITIALIZATION
+    win32->hwnd = hwnd;
 
-	// initialize user
-	_init();
+    // initialize engine
+    #ifndef ENGINE_DISABLE_ENGINE_DEFAULT_INITIALIZATION
+    //engine_pre_init(engine); // engine.h
+    #endif // ENGINE_DISABLE_ENGINE_DEFAULT_INITIALIZATION
 
-    // apply user window title
-    {
-        SetWindowTextW(hwnd, (LPCWSTR)engine->window_title.data);
-    }
+    /* Inputs */
+    win32->in_current = &win32->ins[0];
+    in_on_dll_reload(&win32->ins[1]);
 
-	// apply user window size and show window
-	{
-		// Note: We don't set the window size to user's demanded size on window creation,
-		// because we need user to describe it's desired window size through init(). 
-		// However OpenGL requires a window to be created before being able to use it's API.
-		// Since we want the user to be able to call the graphic api durring init(),
-		// we delay init() after window creation and OpenGL's initialization and only after
-		// do we set the window size according to user's demanded window size.
+    HANDLE startup_thread = CreateThread(
+        NULL,
+        0,
+        win32_startup_thread_proc,
+        0,
+        0,
+        NULL
+    );
 
-		// get non-client window size so it can contain desired client window size
-		int window_width, window_height;
-		{
-			RECT client_to_window_rect = {0};
-			client_to_window_rect.right  = engine->window_size_in_px.x;
-			client_to_window_rect.bottom = engine->window_size_in_px.y;
-			AdjustWindowRect(&client_to_window_rect, WS_OVERLAPPEDWINDOW, FALSE);
-			window_width  = client_to_window_rect.right  - client_to_window_rect.left;
-			window_height = client_to_window_rect.bottom - client_to_window_rect.top;
-		}
-        SetWindowPos(
-            hwnd,
-            NULL,
-            0, 0,
-            window_width, window_height,
-            SWP_NOMOVE | SWP_SHOWWINDOW
-        );
-	}
+    // initialize audio
+    #ifndef ENGINE_DISABLE_MODULE_AUDIO
+    // create and start the audio thread
+    HANDLE hAudioThread = CreateThread(
+        NULL,
+        0,
+        AudioThreadProc,
+        NULL,
+        0,
+        NULL // lpThreadId
+    );
+    #endif // ENGINE_DISABLE_MODULE_AUDIO
 
-
-	// initialize audio
-	#ifndef ENGINE_DISABLE_MODULE_AUDIO
-	// create and start the audio thread
-	HANDLE hAudioThread = CreateThread(
-		NULL,
-		0,
-		AudioThreadProc,
-		NULL,
-		0,
-		NULL // lpThreadId
-	);
-	#endif // ENGINE_DISABLE_MODULE_AUDIO
-
-    // begin main loop
     MSG msg;
-	for(;;) {
-
-        // inputs
-        {
-            // clear mouse wheek
-            engine->mouse_wheel = (V2){ 0, 0 };
-
-            // update buttons
-            int num_batches = sizeof(engine->buttons) / sizeof(engine->buttons[0]);
-            for(int i_batch = 0; i_batch < num_batches; ++i_batch) {
-                // copy last frame's input bits to adjacent bits
-                engine->buttons[i_batch] &= 0x5555555555555555;             // clear very old bits
-                engine->buttons[i_batch] |= engine->buttons[i_batch] << 1;  // copy last frame's bit
-            }
-        }
-		
-		// handle Windows messaging
-		MSG msg;
-		while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-			if (msg.message == WM_QUIT) ExitProcess(0);
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-		}
-
-		// engine pre update
-        #ifndef ENGINE_DISABLE_ENGINE_PRE_UPDATE
-        engine_pre_update(engine);
-        #endif // ENGINE_DISABLE_ENGINE_PRE_UPDATE
-
-        // inputs
-        // updat mouse position
-        {
-            POINT cursor_position;
-            GetCursorPos(&cursor_position);
-            ScreenToClient(hwnd, &cursor_position);
-            engine->mouse_position_at_last_frame = engine->mouse_position;
-            engine->mouse_position               = v2(cursor_position.x, engine->window_size_in_px.y - cursor_position.y);
-            engine->mouse_delta.x = engine->mouse_position.x - engine->mouse_position_at_last_frame.x;
-            engine->mouse_delta.y = engine->mouse_position.y - engine->mouse_position_at_last_frame.y;
-            //if(engine.delta_time > 0)
-            //    engine.mouse.velocity           = lerp(engine.mouse.velocity, engine.mouse.delta / engine.delta_time, 0.75f);
-        }
-
-		// user update
-		_update();
-		
-		// engine post update
-        #ifndef ENGINE_DISABLE_ENGINE_POST_UPDATE
-        engine_post_update(engine);
-        #endif // ENGINE_DISABLE_ENGINE_POST_UPDATE
+    for(;;) {
+        MSG msg;
+        GetMessage(&msg, NULL, 0, 0);
+        if (msg.message == WM_QUIT)
+            ExitProcess(0);
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
 
     return 0;
 }
+#endif /* ENGINE_WIN32_H */

@@ -1,31 +1,67 @@
+/* Copyright (c) 2024 Yuusaku Menka
+ * Licensed under the Apache license, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) */
+
+//#ifndef ENGINE_TYPES_H
+//#define ENGINE_TYPES_H
 // # Types
-// ## Naturals
-typedef unsigned char      U8;
-typedef unsigned short     U16;
-typedef unsigned int       U32 ;
-typedef unsigned long long U64;
-typedef          U64       Uint;
-// ## Integers
-typedef signed   char      I8 ;
-typedef signed   short     I16;
-typedef signed   int       I32;
-typedef signed   long long I64;
-typedef          I64       Int;
-// ## Rationals
-typedef          float     F32;
-typedef          double    F64;
-typedef          F32       Float;
-// ## Booleans
-typedef U8  B8;
-typedef U16 B16;
-typedef U32 B32;
-typedef U64 B64;
-typedef B64 Bool;
+
+#ifdef __INTELLISENSE__ 
+typedef unsigned long long size_t;
+typedef unsigned long long ptrdiff_t;
+#endif
+
+typedef unsigned char               Unsigned_Integer_8bit ;
+typedef unsigned short              Unsigned_Integer_16bit;
+typedef unsigned int                Unsigned_Integer_32bit;
+typedef unsigned long long          Unsigned_Integer_64bit;
+typedef size_t                      Unsigned_Integer      ;
+
+typedef unsigned char               Signed_Integer_8bit ;
+typedef unsigned short              Signed_Integer_16bit;
+typedef unsigned int                Signed_Integer_32bit;
+typedef unsigned long long          Signed_Integer_64bit;
+typedef ptrdiff_t                   Signed_Integer      ;
+
+typedef float                       Floating_Point_Iee754_32bit;
+typedef double                      Floating_Point_Iee754_64bit;
+typedef float                       Floating_Point;
+
+typedef Unsigned_Integer_8bit       U8;
+typedef Unsigned_Integer_16bit      U16;
+typedef Unsigned_Integer_32bit      U32 ;
+typedef Unsigned_Integer_64bit      U64;
+typedef Unsigned_Integer            Uint;
+
+typedef Signed_Integer_8bit         I8 ;
+typedef Signed_Integer_16bit        I16;
+typedef Signed_Integer_32bit        I32;
+typedef Signed_Integer_64bit        I64;
+typedef Signed_Integer              Int;
+
+typedef Floating_Point_Iee754_32bit F32;
+typedef Floating_Point_Iee754_64bit F64;
+typedef Floating_Point              Float;
+
+typedef Unsigned_Integer_8bit       B8;
+typedef Unsigned_Integer_16bit      B16;
+typedef Unsigned_Integer_32bit      B32;
+typedef Unsigned_Integer_64bit      B64;
+typedef Unsigned_Integer            Bool;
+
+typedef struct Vector2d_I16 { I16 x; I16 y; } Vector2d_I16;
+typedef struct Vector2d_I32 { I32 x; I32 y; } Vector2d_I32;
+typedef struct Vector2d_F32 { F32 x; F32 y; } Vector2d_F32;
+
+typedef Vector2d_I16 V2I16;
+typedef Vector2d_I32 V2I32;
+typedef Vector2d_F32 V2F32;
+
+typedef V2F32 V2;
 
 // ## Special values
 // ### Naturals
 #define  U8_MAX ((U8) 0xFF)
-#define U16_MAX ((U16)0xFFFF
+#define U16_MAX ((U16)0xFFFF)
 #define U32_MAX ((U32)0xFFFFFFFF)
 #define U64_MAX ((U32)0xFFFFFFFFFFFFFFFF)
 // ### Integers
@@ -61,3 +97,4 @@ typedef B64 Bool;
 #define KiB(scalar) (scalar << 10)
 #define MiB(scalar) (scalar << 20)
 #define GiB(scalar) (scalar << 30)
+//#endif

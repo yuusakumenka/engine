@@ -1,3 +1,6 @@
+/* Copyright (c) 2024 Yuusaku Menka
+ * Licensed under the Apache license, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) */
+
 // immediate draw module
 typedef unsigned char      Draw_U8;
 typedef unsigned int       Draw_U32;
@@ -56,7 +59,7 @@ typedef struct Draw_Vertex {
 typedef struct Draw_Context {
 	// gpu
 	Gpu_Pipeline_State gpu_pipeline_state;
-	Gpu_Command_List   gpu_command_list;
+	Gpu_Command_List  *gpu_command_list;
 	Gpu_Command_Queue  gpu_command_queue;
 	Gpu_Buffer         gpu_buffer;
 	Gpu_Buffer_Range   gpu_vertex_buffer;
@@ -76,7 +79,14 @@ typedef struct Draw_Context {
 Draw_Context* get_draw_context();
 Draw_Color32 draw_color32(Draw_U8 r, Draw_U8 g, Draw_U8 b, Draw_U8 a);
 Draw_Color32 draw_color(Draw_F32 r, Draw_F32 g, Draw_F32 b, Draw_F32 a);
-void         draw_circ(Draw_F32 x, Draw_F32 y, Draw_F32 radius, int subdivision, Draw_Palette_Color color);
+void         draw_circ(
+	Draw_Context* context,
+	Draw_F32      x, 
+	Draw_F32      y, 
+	Draw_F32      radius, 
+    size_t        num_subdivisions, 
+	Draw_F32      width, 
+    Draw_U32      color);
 
 // utils
 inline float _draw_fakesin(float scalar) {
@@ -101,21 +111,13 @@ Draw_Color32 draw_color(Draw_F32 r, Draw_F32 g, Draw_F32 b, Draw_F32 a) {
 	);
 };
 
-void draw_polyline(
-	int n_line,
-	Draw_F32          (*x_a)[2], 
-	int closed, 
-	Draw_F32           width, 
-	Draw_Palette_Color color
-) {
-	//Draw_Contex* ctx = get_draw_context();
-}
-
-void draw_matrix(
+M3x2 draw_matrix(
     Draw_Context* context,
     M3x2 matrix
 ) {
+	M3x2 old_matrix = context->mvp_matrix;
     context->mvp_matrix = matrix;
+	return old_matrix;
 }
 
 void draw_line(
@@ -166,12 +168,56 @@ void draw_line_v(
     draw_line(context, start.x, start.y, end.x, end.y, width, color);
 }
 
+Draw_Vertex *reserve_polyline(
+    Draw_Context* context,
+	size_t num_vertices,
+	size_t closed
+) {
+	Draw_Index working_vertex_index = context->num_vertices;
+	Draw_Vertex *vertices = &context->cpu_vertex_buffer[context->num_vertices];
+	Draw_Index  *indices  = &context->cpu_index_buffer [context->num_indices];
+    context->num_vertices += num_vertices;
+    context->num_indices  += closed ? num_vertices * 2 - 1 : num_vertices * 2;
+	size_t num_vertices_max = num_vertices ? num_vertices - 1 : 0;
+	for (size_t i_edge = 0; i_edge != num_vertices_max; ++i_edge) {
+		indices[i_edge * 2 + 0] = working_vertex_index + i_edge + 0;
+		indices[i_edge * 2 + 1] = working_vertex_index + i_edge + 1;
+	}
+	if(closed) {
+		indices[((num_vertices - 1) * 2 )  + 0] = working_vertex_index + num_vertices - 1;
+		indices[((num_vertices - 1) * 2 )  + 1] = working_vertex_index + 0;
+	}
+	return vertices;
+}
+
+void draw_polyline(
+    Draw_Context* context,
+	size_t num_vertices,
+	V2 *positions, 
+	size_t closed, 
+	Draw_F32           width, 
+	Draw_Palette_Color color
+) {
+	Draw_Vertex *vertices = reserve_polyline(
+		context,
+		num_vertices,
+		closed
+	);
+	for (size_t i_vertex = 0; i_vertex != num_vertices; ++i_vertex) {
+        vertices[i_vertex].x = positions[i_vertex].x;
+        vertices[i_vertex].y = positions[i_vertex].y;
+        *((V2*)(&vertices[i_vertex].x)) =
+            m3x2_multiply_point(context->mvp_matrix, *((V2*)(&vertices[i_vertex].x)));
+		vertices[i_vertex].color = color;
+	}
+}
+
 void draw_circ(
 	Draw_Context* context,
 	Draw_F32      x, 
 	Draw_F32      y, 
 	Draw_F32      radius, 
-    Draw_U32      num_subdivisions, 
+    size_t        num_subdivisions, 
 	Draw_F32      width, 
     Draw_U32      color
 ) {
@@ -187,7 +233,7 @@ void draw_circ(
     context->num_indices  += num_subdivisions * 2;
 
 	Draw_F32 radian_per_subdivision = 1.0f / num_subdivisions;
-	for (int i_vertex = 0; i_vertex != num_subdivisions; ++i_vertex) {
+	for (size_t i_vertex = 0; i_vertex != num_subdivisions; ++i_vertex) {
 		Draw_F32 theta = radian_per_subdivision * i_vertex;
 		//vertices[i_vertex].x     = x + _draw_fakesin(theta - 0.25f) * radius;
 		//vertices[i_vertex].y     = y + _draw_fakesin(theta)         * radius;
@@ -201,10 +247,29 @@ void draw_circ(
         //vertices[i_vertex].width = width;
 		vertices[i_vertex].color = color;
 	}
-	for (int i_edge = 0; i_edge != num_subdivisions; ++i_edge) {
+	for (size_t i_edge = 0; i_edge != num_subdivisions; ++i_edge) {
 		indices[i_edge * 2 + 0] = working_vertex_index + i_edge;
 		indices[i_edge * 2 + 1] = working_vertex_index + ((i_edge + 1) % num_subdivisions);
 	}
+}
+
+void draw_circ_v(
+	Draw_Context* context,
+	V2            position,
+	Draw_F32      radius, 
+    size_t        num_subdivisions, 
+	Draw_F32      width, 
+    Draw_U32      color
+) {
+	draw_circ(
+		context,
+		position.x,
+		position.y,
+		radius,
+		num_subdivisions,
+		width,
+		color
+	);
 }
 
 void draw_arc(
@@ -226,13 +291,13 @@ void draw_arc(
 	// reserve
 	Draw_Vertex *vertices = &context->cpu_vertex_buffer[context->num_vertices];
 	Draw_Index  *indices  = &context->cpu_index_buffer [context->num_indices];
-	Int num_vertices = num_subdivisions + 1;
+	size_t num_vertices = num_subdivisions + 1;
     context->num_vertices += num_vertices;
     context->num_indices  += num_subdivisions * 2;
 
 	Draw_F32 revolutions_per_subdivision = 
 		(end_angle_in_revolutions - start_angle_in_revolutions) / num_subdivisions;
-	for (int i_vertex = 0; i_vertex != num_vertices; ++i_vertex) {
+	for (size_t i_vertex = 0; i_vertex != num_vertices; ++i_vertex) {
 		Draw_F32 theta_in_revolutions = start_angle_in_revolutions + revolutions_per_subdivision * i_vertex;
 		//vertices[i_vertex].x     = x + _draw_fakesin(theta - 0.25f) * radius;
 		//vertices[i_vertex].y     = y + _draw_fakesin(theta)         * radius;
@@ -246,7 +311,7 @@ void draw_arc(
         //vertices[i_vertex].width = width;
 		vertices[i_vertex].color = color;
 	}
-	for (int i_edge = 0; i_edge != num_subdivisions; ++i_edge) {
+	for (size_t i_edge = 0; i_edge != num_subdivisions; ++i_edge) {
 		indices[i_edge << 1 | 0] = working_vertex_index + i_edge;
 		indices[i_edge << 1 | 1] = working_vertex_index + (i_edge + 1);
 	}
